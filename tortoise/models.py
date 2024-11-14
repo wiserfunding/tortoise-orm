@@ -706,7 +706,7 @@ class Model(metaclass=ModelMeta):
                     setattr(self, key, field_object.to_python_value(value))
                 except Exception:
                     from tortoise.log import logger
-                    logger.error(f"key:{key} value:{value} field_object:{field_object.describe()}", exc_info=True)
+                    logger.error(f"key:{key} value:{value} field_object:{field_object.describe(serializable=True)}", exc_info=True)
                     raise
             elif key in meta.backward_fk_fields:
                 raise ConfigurationError(
