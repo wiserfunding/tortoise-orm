@@ -702,7 +702,12 @@ class Model(metaclass=ModelMeta):
                     self._custom_generated_pk = True
                 if value is None and not field_object.null:
                     raise ValueError(f"{key} is non nullable field, but null was passed")
-                setattr(self, key, field_object.to_python_value(value))
+                try:
+                    setattr(self, key, field_object.to_python_value(value))
+                except Exception:
+                    from tortoise.log import logger
+                    logger.error(f"key:{key} value:{value} field_object:{field_object.describe()}", exc_info=True)
+                    raise
             elif key in meta.backward_fk_fields:
                 raise ConfigurationError(
                     "You can't set backward relations through init, change related model instead"
