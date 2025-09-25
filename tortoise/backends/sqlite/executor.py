@@ -3,7 +3,6 @@ from decimal import Decimal
 from typing import Optional, Type, Union
 
 import pytz
-from pypika import Parameter
 
 from tortoise import Model, fields, timezone
 from tortoise.backends.base.executor import BaseExecutor
@@ -21,6 +20,7 @@ from tortoise.fields import (
 def to_db_bool(
     self: BooleanField, value: Optional[Union[bool, int]], instance: Union[Type[Model], Model]
 ) -> Optional[int]:
+    self.validate(value)
     if value is None:
         return None
     return int(bool(value))
@@ -31,6 +31,7 @@ def to_db_decimal(
     value: Optional[Union[str, float, int, Decimal]],
     instance: Union[Type[Model], Model],
 ) -> Optional[str]:
+    self.validate(value)
     if value is None:
         return None
     return str(Decimal(value).quantize(self.quant).normalize())
@@ -39,6 +40,7 @@ def to_db_decimal(
 def to_db_datetime(
     self: DatetimeField, value: Optional[datetime.datetime], instance: Union[Type[Model], Model]
 ) -> Optional[str]:
+    self.validate(value)
     # Only do this if it is a Model instance, not class. Test for guaranteed instance var
     if hasattr(instance, "_saved_in_db") and (
         self.auto_now
@@ -58,6 +60,7 @@ def to_db_datetime(
 def to_db_time(
     self: TimeField, value: Optional[datetime.time], instance: Union[Type[Model], Model]
 ) -> Optional[str]:
+    self.validate(value)
     if hasattr(instance, "_saved_in_db") and (
         self.auto_now
         or (self.auto_now_add and getattr(instance, self.model_field_name, None) is None)
@@ -82,9 +85,6 @@ class SqliteExecutor(BaseExecutor):
     }
     EXPLAIN_PREFIX = "EXPLAIN QUERY PLAN"
     DB_NATIVE = {bytes, str, int, float}
-
-    def parameter(self, pos: int) -> Parameter:
-        return Parameter("?")
 
     async def _process_insert_result(self, instance: Model, results: int) -> None:
         pk_field_object = self.model._meta.pk

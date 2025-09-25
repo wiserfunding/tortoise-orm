@@ -1,4 +1,4 @@
-from pypika import Parameter, functions
+from pypika import functions
 from pypika.enums import SqlTypes
 from pypika.terms import BasicCriterion, Criterion
 from pypika.utils import format_quotes
@@ -31,19 +31,19 @@ from tortoise.filters import (
 )
 
 
-class StrWrapper(ValueWrapper):  # type: ignore
+class StrWrapper(ValueWrapper):
     """
     Naive str wrapper that doesn't use the monkey-patched pypika ValueWrapper for MySQL
     """
 
-    def get_value_sql(self, **kwargs):
+    def get_value_sql(self, **kwargs) -> str:
         quote_char = kwargs.get("secondary_quote_char") or ""
         value = self.value.replace(quote_char, quote_char * 2)
         return format_quotes(value, quote_char)
 
 
 def escape_like(val: str) -> str:
-    return val.replace("\\", "\\\\\\\\").replace("%", "\\%").replace("_", "\\_")
+    return val.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def mysql_contains(field: Term, value: str) -> Criterion:
@@ -92,12 +92,12 @@ def mysql_insensitive_ends_with(field: Term, value: str) -> Criterion:
     )
 
 
-def mysql_search(field: Term, value: str):
+def mysql_search(field: Term, value: str) -> SearchCriterion:
     return SearchCriterion(field, expr=StrWrapper(value))
 
 
-def mysql_posix_regex(field: Term, value: str):
-    return BasicCriterion(" REGEXP ", field, StrWrapper(value))
+def mysql_posix_regex(field: Term, value: str) -> BasicCriterion:
+    return BasicCriterion(" REGEXP ", field, StrWrapper(value))  # type:ignore[arg-type]
 
 
 class MySQLExecutor(BaseExecutor):
@@ -116,9 +116,6 @@ class MySQLExecutor(BaseExecutor):
         posix_regex: mysql_posix_regex,
     }
     EXPLAIN_PREFIX = "EXPLAIN FORMAT=JSON"
-
-    def parameter(self, pos: int) -> Parameter:
-        return Parameter("%s")
 
     async def _process_insert_result(self, instance: Model, results: int) -> None:
         pk_field_object = self.model._meta.pk

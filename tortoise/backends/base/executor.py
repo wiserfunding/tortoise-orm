@@ -19,12 +19,12 @@ from typing import (
     cast,
 )
 
-from pypika import JoinType, Parameter, Query, Table
+from pypika import JoinType, Parameter, Table
 from pypika.queries import QueryBuilder
-from pypika.terms import ArithmeticExpression, Function
+from pypika.terms import Parameterizer
 
 from tortoise.exceptions import OperationalError
-from tortoise.expressions import F, RawSQL
+from tortoise.expressions import Expression, ResolveContext
 from tortoise.fields.base import Field
 from tortoise.fields.relational import (
     BackwardFKRelation,
@@ -93,10 +93,9 @@ class BaseExecutor:
                     self.column_map[column] = field_object.to_db_value
 
             table = self.model._meta.basetable
+            basequery = cast(QueryBuilder, self.model._meta.basequery)
             self.delete_query = str(
-                self.model._meta.basequery.where(
-                    table[self.model._meta.db_pk_column] == self.parameter(0)
-                ).delete()
+                basequery.where(table[self.model._meta.db_pk_column] == self.parameter(0)).delete()
             )
             self.update_cache: Dict[str, str] = {}
 
@@ -121,14 +120,17 @@ class BaseExecutor:
                 self.update_cache,
             ) = EXECUTOR_CACHE[key]
 
-    async def execute_explain(self, query: Query) -> Any:
-        sql = " ".join((self.EXPLAIN_PREFIX, query.get_sql()))
+    async def execute_explain(self, sql: str) -> Any:
+        sql = " ".join((self.EXPLAIN_PREFIX, sql))
         return (await self.db.execute_query(sql))[1]
 
     async def execute_select(
-        self, query: Union[Query, RawSQL], custom_fields: Optional[list] = None
+        self,
+        sql: str,
+        values: Optional[list] = None,
+        custom_fields: Optional[list] = None,
     ) -> list:
-        _, raw_results = await self.db.execute_query(query.get_sql())
+        _, raw_results = await self.db.execute_query(sql, values)
         instance_list = []
         for row in raw_results:
             if self.select_related_idx:
@@ -169,14 +171,6 @@ class BaseExecutor:
         result_columns = [self.model._meta.fields_db_projection[c] for c in regular_columns]
         return regular_columns, result_columns
 
-    @classmethod
-    def _field_to_db(
-        cls, field_object: Field, attr: Any, instance: "Union[Type[Model], Model]"
-    ) -> Any:
-        if field_object.__class__ in cls.TO_DB_OVERRIDE:
-            return cls.TO_DB_OVERRIDE[field_object.__class__](field_object, attr, instance)
-        return field_object.to_db_value(attr, instance)
-
     def _prepare_insert_statement(
         self, columns: Sequence[str], has_generated: bool = True, ignore_conflicts: bool = False
     ) -> QueryBuilder:
@@ -196,7 +190,11 @@ class BaseExecutor:
         raise NotImplementedError()  # pragma: nocoverage
 
     def parameter(self, pos: int) -> Parameter:
-        raise NotImplementedError()  # pragma: nocoverage
+        return Parameter(idx=pos + 1)
+
+    @classmethod
+    def parameterizer(cls) -> Parameterizer:
+        return Parameterizer()
 
     async def execute_insert(self, instance: "Model") -> None:
         if not instance._custom_generated_pk:
@@ -246,36 +244,45 @@ class BaseExecutor:
     def get_update_sql(
         self,
         update_fields: Optional[Iterable[str]],
-        arithmetic_or_function: Optional[Dict[str, Union[ArithmeticExpression, Function]]],
+        expressions: Optional[Dict[str, Expression]],
     ) -> str:
         """
         Generates the SQL for updating a model depending on provided update_fields.
         Result is cached for performance.
         """
         key = ",".join(update_fields) if update_fields else ""
-        if not arithmetic_or_function and key in self.update_cache:
+        if not expressions and key in self.update_cache:
             return self.update_cache[key]
-        arithmetic_or_function = arithmetic_or_function or {}
+        expressions = expressions or {}
         table = self.model._meta.basetable
         query = self.db.query_class.update(table)
-        count = 0
+        parameter_idx = 0
         for field in update_fields or self.model._meta.fields_db_projection.keys():
             db_column = self.model._meta.fields_db_projection[field]
             field_object = self.model._meta.fields_map[field]
             if not field_object.pk:
-                if field not in arithmetic_or_function.keys():
-                    query = query.set(db_column, self.parameter(count))
-                    count += 1
+                if field not in expressions.keys():
+                    query = query.set(db_column, self.parameter(parameter_idx))
+                    parameter_idx += 1
                 else:
-                    value = F.resolver_arithmetic_expression(
-                        self.model, arithmetic_or_function.get(field)
-                    )[0]
+                    value = (
+                        expressions[field]
+                        .resolve(
+                            ResolveContext(
+                                model=self.model,
+                                table=table,
+                                annotations={},
+                                custom_filters={},
+                            )
+                        )
+                        .term
+                    )
                     query = query.set(db_column, value)
 
-        query = query.where(table[self.model._meta.db_pk_column] == self.parameter(count))
+        query = query.where(table[self.model._meta.db_pk_column] == self.parameter(parameter_idx))
 
         sql = query.get_sql()
-        if not arithmetic_or_function:
+        if not expressions:
             self.update_cache[key] = sql
         return sql
 
@@ -283,20 +290,18 @@ class BaseExecutor:
         self, instance: "Union[Type[Model], Model]", update_fields: Optional[Iterable[str]]
     ) -> int:
         values = []
-        arithmetic_or_function = {}
+        expressions = {}
         for field in update_fields or self.model._meta.fields_db_projection.keys():
             if not self.model._meta.fields_map[field].pk:
                 instance_field = getattr(instance, field)
-                if isinstance(instance_field, (ArithmeticExpression, Function)):
-                    arithmetic_or_function[field] = instance_field
+                if isinstance(instance_field, Expression):
+                    expressions[field] = instance_field
                 else:
                     value = self.column_map[field](instance_field, instance)
                     values.append(value)
         values.append(self.model._meta.pk.to_db_value(instance.pk, instance))
         return (
-            await self.db.execute_query(
-                self.get_update_sql(update_fields, arithmetic_or_function), values
-            )
+            await self.db.execute_query(self.get_update_sql(update_fields, expressions), values)
         )[0]
 
     async def execute_delete(self, instance: "Union[Type[Model], Model]") -> int:
@@ -322,10 +327,8 @@ class BaseExecutor:
             if relation_field not in related_objects_for_fetch:
                 related_objects_for_fetch[relation_field] = []
             related_objects_for_fetch[relation_field].append(
-                self._field_to_db(
-                    instance._meta.fields_map[related_field_name],
-                    getattr(instance, related_field_name),
-                    instance,
+                instance._meta.fields_map[related_field_name].to_db_value(
+                    getattr(instance, related_field_name), instance
                 )
             )
 
@@ -367,10 +370,8 @@ class BaseExecutor:
             if relation_field not in related_objects_for_fetch:
                 related_objects_for_fetch[relation_field] = []
             related_objects_for_fetch[relation_field].append(
-                self._field_to_db(
-                    instance._meta.fields_map[related_field_name],
-                    getattr(instance, related_field_name),
-                    instance,
+                instance._meta.fields_map[related_field_name].to_db_value(
+                    getattr(instance, related_field_name), instance
                 )
             )
 
@@ -402,8 +403,7 @@ class BaseExecutor:
     ) -> "Iterable[Model]":
         to_attr, related_query = related_query
         instance_id_set: set = {
-            self._field_to_db(instance._meta.pk, instance.pk, instance)
-            for instance in instance_list
+            instance._meta.pk.to_db_value(instance.pk, instance) for instance in instance_list
         }
 
         field_object: ManyToManyFieldInstance = self.model._meta.fields_map[field]  # type: ignore
@@ -435,24 +435,25 @@ class BaseExecutor:
             joined_tables: List[Table] = []
             modifier = QueryModifier()
             for node in related_query._q_objects:
-                node._annotations = related_query._annotations
-                node._custom_filters = related_query._custom_filters
                 modifier &= node.resolve(
-                    model=related_query.model,
-                    table=related_query_table,
+                    ResolveContext(
+                        model=related_query.model,
+                        table=related_query_table,
+                        annotations=related_query._annotations,
+                        custom_filters=related_query._custom_filters,
+                    )
                 )
 
-            where_criterion, joins, having_criterion = modifier.get_query_modifiers()
-            for join in joins:
+            for join in modifier.joins:
                 if join[0] not in joined_tables:
                     query = query.join(join[0], how=JoinType.left_outer).on(join[1])
                     joined_tables.append(join[0])
 
-            if where_criterion:
-                query = query.where(where_criterion)
+            if modifier.where_criterion:
+                query = query.where(modifier.where_criterion)
 
-            if having_criterion:
-                query = query.having(having_criterion)
+            if modifier.having_criterion:
+                query = query.having(modifier.having_criterion)
 
         _, raw_results = await self.db.execute_query(query.get_sql())
         relations: List[Tuple[Any, Any]] = []
@@ -536,7 +537,9 @@ class BaseExecutor:
                 relation_field = self.model._meta.fields_map[field_name]
                 related_model: "Type[Model]" = relation_field.related_model  # type: ignore
                 related_query = related_model.all().using_db(self.db)
-                related_query.query = copy(related_query.model._meta.basequery)
+                related_query.query = copy(
+                    related_query.model._meta.basequery
+                )  # type:ignore[assignment]
             if forwarded_prefetches:
                 related_query = related_query.prefetch_related(*forwarded_prefetches)
             self._prefetch_queries.setdefault(field_name, []).append((to_attr, related_query))

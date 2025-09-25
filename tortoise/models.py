@@ -36,6 +36,7 @@ from tortoise.exceptions import (
     OperationalError,
     ParamsError,
 )
+from tortoise.expressions import Expression
 from tortoise.fields.base import Field
 from tortoise.fields.data import IntField
 from tortoise.fields.relational import (
@@ -49,7 +50,6 @@ from tortoise.fields.relational import (
     ReverseRelation,
 )
 from tortoise.filters import FilterInfoDict, get_filters_for_field
-from tortoise.functions import Function
 from tortoise.indexes import Index
 from tortoise.manager import Manager
 from tortoise.queryset import (
@@ -487,7 +487,7 @@ class MetaInfo:
 class ModelMeta(type):
     __slots__ = ()
 
-    def __new__(mcs, name: str, bases: Tuple[Type, ...], attrs: dict):
+    def __new__(mcs, name: str, bases: Tuple[Type, ...], attrs: dict) -> "ModelMeta":
         fields_db_projection: Dict[str, str] = {}
         fields_map: Dict[str, Field] = {}
         filters: Dict[str, FilterInfoDict] = {}
@@ -614,7 +614,12 @@ class ModelMeta(type):
         meta.pk_attr = pk_attr
         meta.pk = fields_map.get(pk_attr)  # type: ignore
         if meta.pk:
-            meta.db_pk_column = meta.pk.source_field or meta.pk_attr
+            if meta.pk.source_field:
+                meta.db_pk_column = meta.pk.source_field
+            elif isinstance(meta.pk, OneToOneFieldInstance):
+                meta.db_pk_column = f"{meta.pk_attr}_id"
+            else:
+                meta.db_pk_column = meta.pk_attr
         meta._inited = False
         if not fields_map:
             meta.abstract = True
@@ -676,7 +681,7 @@ class Model(metaclass=ModelMeta):
             else:
                 setattr(self, key, deepcopy(field_object.default))
 
-    def __setattr__(self, key, value):
+    def __setattr__(self, key, value) -> None:
         # set field value override async default function
         if hasattr(self, "_await_when_save"):
             self._await_when_save.pop(key, None)
@@ -787,7 +792,7 @@ class Model(metaclass=ModelMeta):
             raise TypeError("Model instances without id are unhashable")
         return hash(self.pk)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterable[Tuple]:
         for field in self._meta.db_fields:
             yield field, getattr(self, field)
 
@@ -855,7 +860,7 @@ class Model(metaclass=ModelMeta):
         return self
 
     @classmethod
-    def register_listener(cls, signal: Signals, listener: Callable):
+    def register_listener(cls, signal: Signals, listener: Callable) -> None:
         """
         Register listener to current model class for special Signal.
 
@@ -1025,7 +1030,7 @@ class Model(metaclass=ModelMeta):
             setattr(self, field, getattr(obj, field, None))
 
     @classmethod
-    def _choose_db(cls, for_write: bool = False):
+    def _choose_db(cls, for_write: bool = False) -> BaseDBAsyncClient:
         """
         Return the connection that will be used if this query is executed now.
 
@@ -1253,6 +1258,13 @@ class Model(metaclass=ModelMeta):
         return cls._db_queryset(using_db).first()
 
     @classmethod
+    def last(cls, using_db: Optional[BaseDBAsyncClient] = None) -> QuerySetSingle[Optional[Self]]:
+        """
+        Generates a QuerySet that returns the last record.
+        """
+        return cls._db_queryset(using_db).last()
+
+    @classmethod
     def filter(cls, *args: Q, **kwargs: Any) -> QuerySet[Self]:
         """
         Generates a QuerySet with the filter applied.
@@ -1261,6 +1273,24 @@ class Model(metaclass=ModelMeta):
         :param kwargs: Simple filter constraints.
         """
         return cls._meta.manager.get_queryset().filter(*args, **kwargs)
+
+    @classmethod
+    def latest(cls, *orderings: str) -> QuerySetSingle[Optional[Self]]:
+        """
+        Generates a QuerySet with the filter applied that returns the last record.
+
+        :params orderings: Fields to order by.
+        """
+        return cls._meta.manager.get_queryset().latest(*orderings)
+
+    @classmethod
+    def earliest(cls, *orderings: str) -> QuerySetSingle[Optional[Self]]:
+        """
+        Generates a QuerySet with the filter applied that returns the first record.
+
+        :params orderings: Fields to order by.
+        """
+        return cls._meta.manager.get_queryset().earliest(*orderings)
 
     @classmethod
     def exclude(cls, *args: Q, **kwargs: Any) -> QuerySet[Self]:
@@ -1273,7 +1303,7 @@ class Model(metaclass=ModelMeta):
         return cls._meta.manager.get_queryset().exclude(*args, **kwargs)
 
     @classmethod
-    def annotate(cls, **kwargs: Union[Function, Term]) -> QuerySet[Self]:
+    def annotate(cls, **kwargs: Union[Expression, Term]) -> QuerySet[Self]:
         """
         Annotates the result set with extra Functions/Aggregations/Expressions.
 

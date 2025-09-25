@@ -52,7 +52,7 @@ NO_ACTION = OnDelete.NO_ACTION
 
 class _FieldMeta(type):
     # TODO: Require functions to return field instances instead of this hack
-    def __new__(mcs, name: str, bases: Tuple[Type, ...], attrs: dict):
+    def __new__(mcs, name: str, bases: Tuple[Type, ...], attrs: dict) -> type:
         if len(bases) > 1 and bases[0] is Field:
             # Instantiate class with only the 1st base class (should be Field)
             cls = type.__new__(mcs, name, (bases[0],), attrs)
@@ -258,6 +258,12 @@ class Field(Generic[VALUE], metaclass=_FieldMeta):
         """
         if value is not None and not isinstance(value, self.field_type):
             value = self.field_type(value)  # pylint: disable=E1102
+
+        if self.__class__ in self.model._meta.db.executor_class.TO_DB_OVERRIDE:
+            value = self.model._meta.db.executor_class.TO_DB_OVERRIDE[self.__class__](
+                self, value, instance
+            )
+
         self.validate(value)
         return value
 
@@ -269,10 +275,9 @@ class Field(Generic[VALUE], metaclass=_FieldMeta):
         """
         if value is not None and not isinstance(value, self.field_type):
             value = self.field_type(value)  # pylint: disable=E1102
-        self.validate(value)
         return value
 
-    def validate(self, value: Any):
+    def validate(self, value: Any) -> None:
         """
         Validate whether given value is valid
 
